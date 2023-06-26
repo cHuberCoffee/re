@@ -40,11 +40,14 @@ static bool chall_equal(const struct httpauth_digest_chall *a,
 	int err = 0;
 
 	err |= pl_equal("realm",     &a->realm,     &b->realm);
+	err |= pl_equal("domain",    &a->domain,    &b->domain);
 	err |= pl_equal("nonce",     &a->nonce,     &b->nonce);
 	err |= pl_equal("opaque",    &a->opaque,    &b->opaque);
-	err |= pl_equal("stale",     &a->stale,     &b->stale);
+	err |= a->stale == b->stale ? 0 : EINVAL;
 	err |= pl_equal("algorithm", &a->algorithm, &b->algorithm);
 	err |= pl_equal("qop",       &a->qop,       &b->qop);
+	err |= pl_equal("charset",   &a->charset,   &b->charset);
+	err |= a->userhash == b->userhash ? 0 : EINVAL;
 
 	return err == 0;
 }
@@ -63,11 +66,16 @@ static bool resp_equal(const struct httpauth_digest_resp *a,
 	err |= pl_equal("nc",        &a->nc,        &b->nc);
 	err |= pl_equal("cnonce",    &a->cnonce,    &b->cnonce);
 	err |= pl_equal("qop",       &a->qop,       &b->qop);
+	err |= a->userhash == b->userhash ? 0 : EINVAL;
+	err |= pl_equal("algorithm", &a->algorithm, &b->algorithm);
+	err |= pl_equal("charset",   &a->charset,   &b->charset);
+	err |= pl_equal("opaque",    &a->opaque,    &b->opaque);
 
 	return err == 0;
 }
 
 
+/* Testcase obsoleted by test_httpauth_digest_chall_advanced */
 int test_httpauth_chall(void)
 {
 	static const struct {
@@ -81,12 +89,11 @@ int test_httpauth_chall(void)
 			" opaque=\"123\", stale=\"true\""
 			" algorithm=\"MD5\""
 			,
-			{PL("realm"),
+			{PL("realm"), PL_INIT,
 			 PL("4ee102da2fb730e04a26e8da913249b264f391c3"),
-			 PL("123"),
-			 PL("true"),
-			 PL("MD5"),
-			 PL_INIT},
+			 PL("123"), true, PL("MD5"),
+			 PL_INIT, PL_INIT, false
+			 },
 			0
 		},
 
@@ -94,17 +101,19 @@ int test_httpauth_chall(void)
 			"Digest realm=\"creytiv.com\","
 			" nonce=\"9c916919cbc6ad7f54a4f64e5b5115074ee109fa\""
 			", qop=\"auth\"",
-			{PL("creytiv.com"),
+			{PL("creytiv.com"), PL_INIT,
 			 PL("9c916919cbc6ad7f54a4f64e5b5115074ee109fa"),
-			 PL_INIT, PL_INIT, PL_INIT,
-			 PL("auth"),
+			 PL_INIT, false, PL_INIT, PL("auth"),
+			 PL_INIT, false
 			},
 			0
 		},
 
 		{
 			"Basic bogus",
-			{PL_INIT, PL_INIT, PL_INIT, PL_INIT, PL_INIT, PL_INIT},
+			{PL_INIT, PL_INIT, PL_INIT, PL_INIT, false,
+			 PL_INIT, PL_INIT, PL_INIT, false
+			},
 			EBADMSG
 		},
 	};
@@ -139,6 +148,8 @@ int test_httpauth_chall(void)
 }
 
 
+/* Testcase obsoleted by test_httpauth_digest_resp_advanced */
+/* Testcase obsoleted by test_httpauth_digest_complete      */
 int test_httpauth_resp(void)
 {
 	static const struct {
@@ -158,13 +169,12 @@ int test_httpauth_resp(void)
 			,
 			{PL("creytiv.com"),
 			 PL("9c916919cbc6ad7f54a4f64e5b5115074ee109fa"),
-			 PL("bb996865add5a86217f39e1f369c29ea"),
-			 PL("aeh"),
-			 PL("sip:creytiv.com;transport=udp"),
-			 PL("00000002"),
-			 PL("66a7a21e46ad8edd"),
-			 PL("auth"),
-			 NULL},
+			 PL_INIT, PL_INIT, PL("auth"), PL_INIT, false,
+			 NULL, PL("bb996865add5a86217f39e1f369c29ea"),
+			 NULL, PL("aeh"),
+			 PL_INIT, PL("sip:creytiv.com;transport=udp"),
+			 NULL, PL("66a7a21e46ad8edd"),
+			 NULL, PL("00000002"), NULL},
 			PL("REGISTER"),
 			"\x1c\x0a\x98\x61\x5b\x7b\x37\xc6"
 			"\x94\x51\xae\xb6\x4b\x2f\x11\x02",
@@ -172,11 +182,13 @@ int test_httpauth_resp(void)
 		},
 		{
 			"Digest bogus tull",
-			{PL_INIT, PL_INIT, PL_INIT, PL_INIT,
-			 PL_INIT, PL_INIT, PL_INIT, PL_INIT, NULL},
-			PL_INIT,
-			"",
-			EBADMSG
+			{PL_INIT, PL_INIT, PL_INIT,
+			 PL_INIT, PL_INIT, PL_INIT, false, NULL, PL_INIT,
+			 NULL, PL_INIT, PL_INIT, PL_INIT, NULL, PL_INIT,
+			 NULL, PL_INIT, NULL},
+			 PL_INIT,
+			 "",
+			 EBADMSG
 		},
 	};
 	size_t i;
@@ -218,6 +230,820 @@ int test_httpauth_resp(void)
 	return err;
 }
 
+
+/**
+ * Request Challenge Printer testcase
+ * Disclaimer: Nonce is not reproducible, because of the timestamp
+ */
+int test_httpauth_digest_request(void)
+{
+	static const struct {
+		const char *hval_fmt;
+		const char *realm;
+		const char *domain;
+		const char *etag;
+		const char *opaque;
+		const bool stale;
+		const char *algorithm;
+		const char *qop;
+		const char *charset;
+		const bool userhash;
+		int err;
+	} testv[] = {
+		{
+			"",
+			NULL, NULL, "", NULL, false,
+			NULL, "auth", NULL, false, EINVAL
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=MD5",
+			"/my/home", NULL, "localhost:5060", NULL, false,
+			NULL, "auth", NULL, false, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"\","
+			" nonce=\"%s\", algorithm=MD5",
+			"/my/home", NULL, "localhost:5060", NULL, false,
+			NULL, "", NULL, false, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=SHA256",
+			"/my/home", NULL, "localhost:5060", NULL, false,
+			"SHA256", "auth", NULL, false, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=SHA256-sess, stale=true",
+			"/my/home", NULL, "localhost:5060", NULL, true,
+			"SHA256-sess", "auth", NULL, false, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=SHA1,"
+			" stale=true, userhash=true",
+			"/my/home", NULL, "localhost:5060", NULL, true,
+			"SHA1", "auth", NULL, true, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=SHA1-sess,"
+			" domain=\"example.com\", stale=true,"
+			" charset=\"UTF-8\", userhash=true",
+			"/my/home", "example.com", "localhost:5060", NULL,
+			true, "SHA1-sess", "auth", "UTF-8", true, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth\","
+			" nonce=\"%s\", algorithm=SHA256,"
+			" domain=\"example.com\", stale=true,"
+			" charset=\"UTF-8\", userhash=true",
+			"/my/home", "example.com", "localhost:5060", NULL,
+			true, "SHA256", "auth", "UTF-8", true, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth-int\","
+			" nonce=\"%s\", algorithm=MD5-sess,"
+			" domain=\"example.com\", stale=true,"
+			" charset=\"UTF-8\", userhash=true",
+			"/my/home", "example.com", "localhost:5060", NULL,
+			true, "MD5-sess", "auth-int", "UTF-8", true, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth-int\","
+			" nonce=\"%s\", algorithm=SHA1-sess,"
+			" domain=\"example.com\", stale=true,"
+			" charset=\"UTF-8\", userhash=true",
+			"/my/home", "example.com", "213579023", NULL,
+			true, "SHA1-sess", "auth-int", "UTF-8", true, 0
+		},
+		{
+			"Digest realm=\"/my/home\", qop=\"auth-int\","
+			" nonce=\"%s\", algorithm=MD5,"
+			" domain=\"example.com\", stale=true,"
+			" charset=\"UTF-8\", userhash=true",
+			"/my/home", "example.com", "129842", NULL,
+			true, NULL, "auth-int", "UTF-8", true, 0
+		},
+	};
+
+	unsigned int i = 0;
+	int err = 0;
+
+	for (i = 0; i < RE_ARRAY_SIZE(testv); ++i) {
+		struct httpauth_digest_req *req = NULL;
+		struct mbuf *mb_refval = NULL;
+		struct mbuf *mb_printed = NULL;
+
+		mb_refval = mbuf_alloc(512);
+		mb_printed = mbuf_alloc(512);
+		if (!mb_refval || !mb_printed) {
+			err = ENOMEM;
+			goto for_out;
+		}
+
+		err = httpauth_digest_request(&req, testv[i].realm,
+			testv[i].domain, testv[i].etag, testv[i].opaque,
+			testv[i].stale, testv[i].algorithm, testv[i].qop,
+			testv[i].charset, testv[i].userhash);
+		if (err == ENOMEM) {
+			goto for_out;
+		}
+		else if (err != testv[i].err) {
+			DEBUG_WARNING("Expected return value %m, got %m\n",
+				testv[i].err, err);
+			err = testv[i].err;
+			goto for_out;
+		}
+		else if (err) {
+			goto for_continue;
+		}
+
+		err = mbuf_printf(mb_refval, testv[i].hval_fmt, req->nonce);
+		if (err) {
+			DEBUG_WARNING("No reference created\n");
+			goto for_out;
+		}
+
+		err = mbuf_printf(mb_printed,
+			"%H", httpauth_digest_request_print, req);
+		if (err) {
+			DEBUG_WARNING("Digest request print error %m\n", err);
+			goto for_out;
+		}
+
+		if (mb_refval->end != mb_printed->end) {
+			DEBUG_WARNING("[%d] Expected header len %d, got %d\n",
+				i, mb_refval->end, mb_printed->end);
+			err = EINVAL;
+			goto for_out;
+		}
+
+		if (memcmp(mb_refval->buf, mb_printed->buf, mb_refval->end)) {
+			DEBUG_WARNING("Expected header %b, got %b\n",
+				mb_refval->buf, mb_refval->end,
+				mb_printed->buf, mb_printed->end);
+			err = EINVAL;
+			goto for_out;
+		}
+
+for_continue:
+		mem_deref(req);
+		mem_deref(mb_refval);
+		mem_deref(mb_printed);
+		continue;
+
+for_out:
+		mem_deref(req);
+		mem_deref(mb_refval);
+		mem_deref(mb_printed);
+		break;
+	}
+
+	return err;
+}
+
+
+/* Response Digest calculation testcase */
+/* Testcases are precalculated with NC=00000001 & CNONCE=deadbeef */
+int test_httpauth_digest_resp_calc_advanced(void)
+{
+	static const struct {
+		const struct httpauth_digest_chall chall;
+		const char *user;
+		const char *passwd;
+		const char *qop;
+		const struct pl method;
+		const char *uri;
+		const char *entityBody;
+		const char *precalc_digest;
+	} testv[] = {
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("MD5"), PL("auth"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth", PL("GET"),
+			"example.com/my/home/something", NULL,
+			"88f41f7227700e07d0d65256714a5a1a"
+		},
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("SHA1"), PL("auth"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth", PL("GET"),
+			"example.com/my/home/something", NULL,
+			"417bd44d62c73baa0f0291fb36d4777878369544"
+		},
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("SHA256"), PL("auth"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth", PL("GET"),
+			"example.com/my/home/something", NULL,
+			"c22b56ce81bbb59570f0fbbc0ba27210dbbfcb2b23fe"
+			"a371d214722f319dc41c"
+		},
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("MD5-sess"), PL("auth"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth", PL("GET"),
+			"example.com/my/home/something", NULL,
+			"1e79ac7105a4fdf416aaacfc50349110"
+		},
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("SHA1"), PL("auth-int"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth-int", PL("GET"),
+			"example.com/my/home/something", "a text body",
+			"1565b20cc176a3eed8cd0318600cf3caf96fd23c"
+		},
+		{
+			{
+				PL("/my/home"), PL_INIT,
+				PL("b5c64f319d37323ac652b77012817ccaa"
+				"6e9a7e4e7563155f1f9556414dd4615"),
+				PL("324DF3428BCF42D29A"), false,
+				PL("SHA256"), PL("auth-int"), PL_INIT, false
+			},
+			"retest", "sec_pwd_retest", "auth-int", PL("GET"),
+			"example.com/my/home/something", "",
+			"2c0746b7174441314164d8d9a980d8920732de32e163"
+			"03f0e6a82970230e79e4"
+		},
+	};
+
+	unsigned int i = 0;
+	int err = 0;
+
+	for (i = 0; i < RE_ARRAY_SIZE(testv); ++i) {
+		struct httpauth_digest_resp *resp = NULL;
+
+		err = httpauth_digest_response_priv(&resp, &testv[i].chall,
+			&testv[i].method, testv[i].uri, testv[i].user,
+			testv[i].passwd, testv[i].qop, testv[i].entityBody,
+			false, NULL, true);
+		if (err == ENOMEM) {
+			goto for_out;
+		}
+		else if (err) {
+			DEBUG_WARNING("Response Calculation Advanced:"
+				" Could not generate response %m\n", err);
+			goto for_out;
+		}
+
+		if (str_casecmp(resp->response_str,
+			testv[i].precalc_digest) != 0) {
+			err = EINVAL;
+			DEBUG_WARNING("Response Calculation Advanced: "
+				"Response does not match in %i\n", i);
+			goto for_out;
+		}
+
+		mem_deref(resp);
+		continue;
+for_out:
+		mem_deref(resp);
+		break;
+	}
+
+	return err;
+}
+
+
+/* Request Challenge Parser testcase */
+int test_httpauth_digest_chall_decode_advanced(void)
+{
+		static const struct {
+		const struct pl hval;
+		const struct httpauth_digest_chall ref_chall;
+		int err;
+	} testv[] = {
+		{
+			PL("Digest nonce=\"34C0AA77097AD342BF32C3\","
+			" opaque=\"324DF3428BCF42D29A\", algorithm=SHA256,"
+			" qop=\"auth\""),
+			{PL("/my/home"), PL_INIT,
+			PL("34C0AA77097AD342BF32C3"),
+			PL("324DF3428BCF42D29A"), false,
+			PL("SHA256"), PL("auth"), PL_INIT, false},
+			EBADMSG
+		},
+		{
+			PL("Digest realm=\"/my/home\","
+			" nonce=\"34C0AA77097AD342BF32C3\","
+			" opaque=\"324DF3428BCF42D29A\", algorithm=SHA256,"
+			" qop=\"auth\""),
+			{PL("/my/home"), PL_INIT,
+			PL("34C0AA77097AD342BF32C3"),
+			PL("324DF3428BCF42D29A"), false,
+			PL("SHA256"), PL("auth"), PL_INIT, false},
+			0
+		},
+		{
+			PL("Digest realm=\"/my/home\","
+			" nonce=\"34C0AA77097AD342BF32C3\","
+			" opaque=\"324DF3428BCF42D29A\", algorithm=SHA256,"
+			" qop=\"auth\", userhash=true"),
+			{PL("/my/home"), PL_INIT,
+			PL("34C0AA77097AD342BF32C3"),
+			PL("324DF3428BCF42D29A"), false,
+			PL("SHA256"), PL("auth"), PL_INIT, true},
+			0
+		},
+		{
+			PL("Digest realm=\"/my/home\","
+			" nonce=\"34C0AA77097AD342BF32C3\","
+			" opaque=\"324DF3428BCF42D29A\","
+			" algorithm=SHA256, qop=\"auth\""),
+			{PL("/my/home"), PL_INIT,
+			PL("34C0AA77097AD342BF32C3"),
+			PL("324DF3428BCF42D29A"), false,
+			PL("SHA256"), PL("auth"), PL_INIT, false},
+			0
+		},
+		{
+			PL("Digest realm=\"/my/home\","
+			" domain=\"example.com\","
+			" nonce=\"34C0AA77097AD342BF32C3\","
+			" stale=true, opaque=\"324DF3428BCF42D29A\","
+			" algorithm=SHA1, qop=\"auth\""),
+			{PL("/my/home"), PL("example.com"),
+			PL("34C0AA77097AD342BF32C3"),
+			PL("324DF3428BCF42D29A"), true,
+			PL("SHA1"), PL("auth"), PL_INIT, false},
+			0
+		}
+	};
+
+	unsigned int i = 0;
+	int err = 0;
+
+	for (i = 0; i < RE_ARRAY_SIZE(testv); ++i) {
+		struct httpauth_digest_chall chall;
+
+		err = httpauth_digest_challenge_decode(&chall, &testv[i].hval);
+		if (err != testv[i].err) {
+			DEBUG_WARNING("Challenge decoding advanced:"
+				" Expected return value %m, got %m\n",
+				testv[i].err, err);
+			err = testv[i].err;
+			return err;
+		}
+		else if (err)
+			continue;
+
+		if (!chall_equal(&testv[i].ref_chall, &chall)) {
+			DEBUG_WARNING("Challenge decoding advanced:"
+				" Challenge Eq: test %d failed\n", i);
+			err = EBADMSG;
+			break;
+		}
+	}
+
+	return err;
+}
+
+
+/* Response Parser + Printer testcase */
+int test_httpauth_digest_resp_decode_advanced(void)
+{
+	static const struct {
+		const char *hval;
+		const struct httpauth_digest_resp ref_resp;
+		int err;
+	} testv[] = {
+		{
+			"Digest realm=\"/my/home\","
+			" username=\"retest\", uri=\"example.com/my/home\","
+			" response=\"5debc59161556c99d027e9d"
+			"d4649e153f8743402e3cff2f54eb95f2f90b3cfaf\","
+			" opaque=\"185803523d335c8fe52cf633391d47f7\","
+			" algorithm=SHA256-sess, qop=auth,"
+			" cnonce=\"017EECC9\", nc=0000000C",
+			{
+				PL("/my/home"),
+				PL_INIT,
+				PL("185803523d335c8fe52cf633391d47f7"),
+				PL("SHA256-sess"), PL("auth"), PL_INIT, false,
+				NULL, PL("5debc59161556c99d027e9dd4649e153f8"
+				"743402e3cff2f54eb95f2f90b3cfaf"),
+				NULL, PL("retest"), PL_INIT,
+				PL("example.com/my/home"),
+				NULL, PL("017EECC9"),
+				NULL, PL("0000000C"), NULL
+			},
+			EBADMSG
+		},
+		{
+			"Digest realm=\"/my/home\","
+			" nonce=\"0e5b8cbeb40a588c281e8f904b"
+			"40b48586a2cd310a5da133654992a434b5d30d\","
+			" username=\"retest\", uri=\"example.com/my/home\","
+			" response=\"5debc59161556c99d027e9d"
+			"d4649e153f8743402e3cff2f54eb95f2f90b3cfaf\","
+			" opaque=\"185803523d335c8fe52cf633391d47f7\","
+			" algorithm=SHA256-sess, qop=auth,"
+			" cnonce=\"017EECC9\", nc=0000000C",
+			{
+				PL("/my/home"),
+				PL("0e5b8cbeb40a588c281e8f904b40b48"
+				"586a2cd310a5da133654992a434b5d30d"),
+				PL("185803523d335c8fe52cf633391d47f7"),
+				PL("SHA256-sess"), PL("auth"), PL_INIT, false,
+				NULL, PL("5debc59161556c99d027e9dd4649e153f8"
+				"743402e3cff2f54eb95f2f90b3cfaf"),
+				NULL, PL("retest"), PL_INIT,
+				PL("example.com/my/home"),
+				NULL, PL("017EECC9"),
+				NULL, PL("0000000C"), NULL
+			},
+			0
+		},
+		{
+			"Digest realm=\"/my/home\","
+			" nonce=\"0e5b8cbeb40a588c281e8f904b"
+			"40b48586a2cd310a5da133654992a434b5d30d\","
+			" username=\"retest\", uri=\"example.com/my/home\","
+			" response=\"5debc59161556c99d027e9d"
+			"d4649e153f8743402e3cff2f54eb95f2f90b3cfaf\","
+			" opaque=\"185803523d335c8fe52cf633391d47f7\","
+			" algorithm=SHA1",
+			{
+				PL("/my/home"),
+				PL("0e5b8cbeb40a588c281e8f904b40b48"
+				"586a2cd310a5da133654992a434b5d30d"),
+				PL("185803523d335c8fe52cf633391d47f7"),
+				PL("SHA1"), PL_INIT, PL_INIT, false,
+				NULL, PL("5debc59161556c99d027e9dd4649e153f8"
+				"743402e3cff2f54eb95f2f90b3cfaf"),
+				NULL, PL("retest"), PL_INIT,
+				PL("example.com/my/home"),
+				NULL, PL_INIT, NULL, PL_INIT, NULL
+			},
+			0
+		},
+		{
+			"Digest realm=\"/my/home\","
+			" nonce=\"0e5b8cbeb40a588c281e8f904b"
+			"40b48586a2cd310a5da133654992a434b5d30d\","
+			" username=\"retest\", uri=\"example.com/my/home\","
+			" response=\"5debc59161556c99d027e9d"
+			"d4649e153f8743402e3cff2f54eb95f2f90b3cfaf\","
+			" opaque=\"185803523d335c8fe52cf633391d47f7\","
+			" algorithm=SHA256-sess, qop=auth,"
+			" cnonce=\"017EECC9\", nc=0000000C, userhash=true,"
+			" charset=\"UTF-8\"",
+			{
+				PL("/my/home"),
+				PL("0e5b8cbeb40a588c281e8f904b40b48"
+				"586a2cd310a5da133654992a434b5d30d"),
+				PL("185803523d335c8fe52cf633391d47f7"),
+				PL("SHA256-sess"), PL("auth"),
+				PL("UTF-8"), true,
+				NULL, PL("5debc59161556c99d027e9dd4649e153f8"
+				"743402e3cff2f54eb95f2f90b3cfaf"),
+				NULL, PL("retest"), PL_INIT,
+				PL("example.com/my/home"),
+				NULL, PL("017EECC9"),
+				NULL, PL("0000000C"), NULL
+			},
+			0
+		}
+	};
+
+	unsigned int i = 0;
+	int err = 0;
+
+	for (i = 0; i < RE_ARRAY_SIZE(testv); ++i) {
+		struct mbuf *mb_refval = NULL;
+		struct mbuf *mb_printed = NULL;
+		struct httpauth_digest_resp resp;
+		struct pl plhval;
+
+		mb_refval = mbuf_alloc(512);
+		mb_printed = mbuf_alloc(512);
+		if (!mb_refval || !mb_printed) {
+			err = ENOMEM;
+			goto for_out;
+		}
+
+		pl_set_str(&plhval, testv[i].hval);
+		err = httpauth_digest_response_decode(&resp, &plhval);
+		if (err != testv[i].err) {
+			DEBUG_WARNING("Response decoding advanced:"
+				" Expected return value %m, got %m\n",
+				testv[i].err, err);
+			err = testv[i].err;
+			goto for_out;
+		}
+		else if (err)
+			goto for_continue;
+
+		if (!resp_equal(&testv[i].ref_resp, &resp)) {
+			DEBUG_WARNING("Response decoding advanced:"
+				" Response Eq: test %d failed\n", i);
+			err = EBADMSG;
+			goto for_out;
+		}
+
+		err = mbuf_printf(mb_refval, "%s", testv[i].hval);
+		if (err) {
+			DEBUG_WARNING("Response decoding advanced:"
+				" No reference created\n");
+			goto for_out;
+		}
+
+		err = mbuf_printf(mb_printed, "%H",
+			httpauth_digest_response_print, &resp);
+		if (err) {
+			DEBUG_WARNING("Response decoding advanced:"
+				" Digest response print error %m\n", err);
+			goto for_out;
+		}
+
+		if (memcmp(mb_refval->buf, mb_printed->buf, mb_refval->end)) {
+			DEBUG_WARNING("Response decoding advanced:"
+				" Expected header %b, got %b\n",
+				mb_refval->buf, mb_refval->end,
+				mb_printed->buf, mb_printed->end);
+			err = EINVAL;
+			goto for_out;
+		}
+
+for_continue:
+		mem_deref(mb_refval);
+		mem_deref(mb_printed);
+		continue;
+for_out:
+		mem_deref(mb_refval);
+		mem_deref(mb_printed);
+		break;
+	}
+
+	return err;
+}
+
+/* Request - Response Verification testcase */
+int test_httpauth_digest_verify_advanced(void)
+{
+	static const struct {
+		const char *realm;
+		const char *domain;
+		const char *opaque;
+		const bool stale;
+		const char *algorithm;
+		const char *qop;
+		const char *charset;
+		const bool userhash;
+
+		const char *etag;
+		const char *entityBody;
+
+		const char *user;
+		const char *passwd;
+		const char *uri;
+		const struct pl method;
+		const char *huser;
+
+	} testv[] = {
+		/* qop=auth & normal algorithms */
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "MD5", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passwd",
+			"example.com/my/home/something", PL("GET"), NULL,
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA1", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		/* qop=auth & session algorithms */
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "MD5-sess", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA1-sess", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256-sess", "auth", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		/* qop=auth-int & normal algorithms*/
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "MD5", "auth-int", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA1", "auth-int", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256", "auth-int", NULL, false,
+			"localhost:5060", "Strange body with content",
+			"retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		/* qop=auth-int & session algorithms*/
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "MD5-sess", "auth-int", NULL, false,
+			"localhost:5060", "NOT NULL", "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA1-sess", "auth-int", NULL, false,
+			"localhost:5060", NULL, "retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256-sess", "auth-int", NULL, false,
+			"localhost:5060", "NULL as String :D",
+			"retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+		/* userhash implementation */
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256-sess", "auth-int", NULL, true,
+			"localhost:5060", "NULL as String :D",
+			"retest", "sec_passed",
+			"example.com/my/home/something", PL("GET"),
+			"98b91114772b99c0257fa1f3139da872857c0b70e3f8"
+			"63766a78790aa8007a40"
+		},
+		/* charset implementation */
+		{
+			"/my/home", "example.com",
+			"185803523d335c8fe52cf633391d47f7",
+			false, "SHA256-sess", "auth-int", "UTF-8", false,
+			"localhost:5060", "NULL as String :D",
+			"retest\xe2\x82\xac", "sec_passed\xe2\x82\xac",
+			"example.com/my/home/something", PL("GET"), NULL
+		},
+	};
+
+	unsigned int i = 0;
+	int err = 0;
+
+	for (i = 0; i < RE_ARRAY_SIZE(testv); ++i) {
+		struct httpauth_digest_req *req = NULL;
+		struct httpauth_digest_chall chall;
+		struct httpauth_digest_resp *resp = NULL;
+		struct pl plreq;
+		struct pl plresp;
+
+		struct mbuf *mb_req = NULL;
+		struct mbuf *mb_resp = NULL;
+
+		mb_req = mbuf_alloc(512);
+		mb_resp = mbuf_alloc(512);
+		if (!mb_req || !mb_resp) {
+			err = ENOMEM;
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+				" Could not allocate request buffer\n");
+			goto for_out;
+		}
+
+		err = httpauth_digest_request(&req, testv[i].realm,
+			testv[i].domain, testv[i].etag, testv[i].opaque,
+			testv[i].stale, testv[i].algorithm, testv[i].qop,
+			testv[i].charset, testv[i].userhash);
+		if (err == ENOMEM) {
+			goto for_out;
+		}
+		else if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+				"Could not generate request %m\n", err);
+			goto for_out;
+		}
+
+		err = mbuf_printf(mb_req, "%H",
+			httpauth_digest_request_print, req);
+		if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+				"Cout not write digest request %m\n",
+				err);
+			goto for_out;
+		}
+
+		mbuf_set_pos(mb_req, 0);
+		pl_set_mbuf(&plreq, mb_req);
+		err = httpauth_digest_challenge_decode(&chall, &plreq);
+		if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+			"Could not decode \"received\" challenge %m\n", err);
+			goto for_out;
+		}
+
+		err = httpauth_digest_response_priv(&resp, &chall,
+			&testv[i].method, testv[i].uri, testv[i].user,
+			testv[i].passwd, testv[i].qop, testv[i].entityBody,
+			testv[i].userhash, testv[i].charset, false);
+		if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+			" Could not create response to given challenge %m\n",
+			err);
+			goto for_out;
+		}
+
+		err = mbuf_printf(mb_resp, "%H",
+			httpauth_digest_response_print, resp);
+		if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+				" Could not write digest response %m\n",
+				err);
+			goto for_out;
+		}
+
+		mbuf_set_pos(mb_resp, 0);
+		pl_set_mbuf(&plresp, mb_resp);
+		err = httpauth_digest_verify_priv(req, &plresp,
+			&testv[i].method, testv[i].etag,
+			testv[i].userhash ? testv[i].huser : testv[i].user,
+			testv[i].passwd, testv[i].entityBody, true);
+		if (err) {
+			DEBUG_WARNING("Req-Resp Verification advanced:"
+				" Could not verify challenge - response %m\n",
+				err);
+			goto for_out;
+		}
+
+		mem_deref(req);
+		mem_deref(resp);
+		mem_deref(mb_req);
+		mem_deref(mb_resp);
+		continue;
+for_out:
+		mem_deref(req);
+		mem_deref(resp);
+		mem_deref(mb_req);
+		mem_deref(mb_resp);
+		break;
+	}
+
+	return err;
+}
+
+/* HTTP AUTH BASIC TESTCASE */
 
 int test_httpauth_basic_request(void) {
 	static const struct {
