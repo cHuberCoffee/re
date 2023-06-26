@@ -166,7 +166,7 @@ static bool auth_handler(const struct sip_hdr *hdr, const struct sip_msg *msg,
 			goto out;
 	}
 	else {
-		if (!pl_isset(&ch.stale) || pl_strcasecmp(&ch.stale, "true")) {
+		if (!ch.stale) {
 			err = EAUTH;
 			goto out;
 		}
