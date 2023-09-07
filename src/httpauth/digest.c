@@ -17,7 +17,8 @@
 
 
 enum {
-	CNONCE_NC_LENGTH = 9, /* 8 characters + '\0' */
+	CNONCE_NC_LENGTH = 9,   /* 8 characters + '\0'   */
+	NONCE_EXPIRES    = 300, /* expires after 300 sec */
 };
 
 
@@ -75,6 +76,25 @@ static void challenge_decode(const struct pl *name, const struct pl *val,
 }
 
 
+static void algorithm_decode(struct httpauth_digest_resp *resp,
+	const struct pl *val)
+{
+	resp->algorithm = *val;
+	if (pl_strstr(val, "SHA256")) {
+		resp->hash_function = &sha256;
+		resp->hash_length = SHA256_DIGEST_LENGTH;
+	}
+	else if (pl_strstr(val, "SHA1")) {
+		resp->hash_function = &sha1;
+		resp->hash_length = SHA_DIGEST_LENGTH;
+	}
+	else {
+		resp->hash_function = &md5;
+		resp->hash_length = MD5_SIZE;
+	}
+}
+
+
 static void response_decode(const struct pl *name, const struct pl *val,
 			    void *arg)
 {
@@ -96,6 +116,12 @@ static void response_decode(const struct pl *name, const struct pl *val,
 		resp->cnonce = *val;
 	else if (!pl_casecmp(name, &param_qop))
 		resp->qop = *val;
+	else if (!pl_casecmp(name, &param_algorithm))
+		algorithm_decode(resp, val);
+	else if (!pl_casecmp(name, &param_charset))
+		resp->charset = *val;
+	else if (!pl_casecmp(name, &param_userhash))
+		resp->userhash = *val;
 }
 
 
@@ -489,6 +515,40 @@ out:
 
 	mem_deref(mb);
 
+	return err;
+}
+
+
+static int check_nonce(const char *req_nonce,
+	const struct pl *resp_nonce, const char *etag)
+{
+	struct pl pl = PL_INIT;
+	time_t ts;
+	char *renonce = NULL;
+	int err = 0;
+
+	if (!req_nonce || !resp_nonce || !etag)
+		return EINVAL;
+
+	pl = *resp_nonce;
+	pl.p = pl.p + (pl.l - 16);
+	pl.l = 16;
+	ts = (time_t) pl_x64(&pl);
+
+	if (time(NULL) - ts > NONCE_EXPIRES) {
+		err = ETIMEDOUT;
+		goto out;
+	}
+
+	err = generate_nonce(&renonce, ts, etag, NULL);
+	if (err)
+		goto out;
+
+	if (str_casecmp(req_nonce, renonce))
+		err = EAUTH;
+
+out:
+	mem_deref(renonce);
 	return err;
 }
 
@@ -1006,12 +1066,153 @@ int httpauth_digest_response_full(struct httpauth_digest_enc_resp **presp,
 	}
 
 	err = digest_response(resp, chall, method, user, passwd, entitybody);
-
 out:
 	if (err)
 		mem_deref(resp);
 	else
 		*presp = resp;
 
+	return err;
+}
+
+
+static int digest_verify(struct httpauth_digest_chall_req *req,
+	struct httpauth_digest_resp *resp, const struct pl *method,
+	const char * user, const char *passwd, const char *entitybody)
+{
+	uint8_t *hash1 = NULL;
+	uint8_t *hash2 = NULL;
+	struct mbuf *mb = NULL;
+	int err = 0;
+
+	mb = mbuf_alloc(str_len(user) + str_len(passwd) +
+		str_len(req->realm) + 2);
+	hash1 = mem_zalloc(resp->hash_length, NULL);
+	hash2 = mem_zalloc(resp->hash_length, NULL);
+	if (!mb || !hash1 || !hash2) {
+		err = ENOMEM;
+		goto out;
+	}
+
+	/* HASH A2 */
+	if (pl_strstr(&resp->qop, "auth-int")) {
+		if (!str_isset(entitybody))
+			resp->hash_function((uint8_t *)"", str_len(""), hash1);
+		else
+			resp->hash_function((uint8_t *)entitybody,
+				str_len(entitybody), hash1);
+
+		err = mbuf_printf(mb, "%r:%r:%w", method, &resp->uri,
+			hash1, resp->hash_length);
+	}
+	else {
+		err = mbuf_printf(mb, "%r:%r", method, &resp->uri);
+	}
+
+	if (err)
+		goto out;
+
+	resp->hash_function(mb->buf, mb->end, hash2);
+	mbuf_rewind(mb);
+
+	/* HASH A1 */
+	if (pl_strcmp(&resp->username, user) != 0) {
+		err = EACCES;
+		goto out;
+	}
+
+	err = mbuf_printf(mb, "%s:%r:%s", user, &resp->realm, passwd);
+	if (err)
+		goto out;
+
+	resp->hash_function(mb->buf, mb->end, hash1);
+	mbuf_rewind(mb);
+
+	if (pl_strstr(&resp->algorithm, "-sess")) {
+		err = mbuf_printf(mb, "%w:%r:%r",
+			hash1, resp->hash_length, &resp->nonce, &resp->cnonce);
+		if (err)
+			goto out;
+
+		resp->hash_function(mb->buf, mb->end, hash1);
+		mbuf_rewind(mb);
+	}
+
+	/* DIGEST */
+	if (pl_isset(&resp->qop)) {
+		err = mbuf_printf(mb, "%w:%r:%r:%r:%r:%w",
+			hash1, resp->hash_length, &resp->nonce,
+			&resp->nc, &resp->cnonce, &resp->qop,
+			hash2, resp->hash_length);
+	}
+	else {
+		err = mbuf_printf(mb, "%w:%r:%w", hash1, resp->hash_length,
+			&resp->nonce, hash2, resp->hash_length);
+	}
+
+	if (err)
+		goto out;
+
+	resp->hash_function(mb->buf, mb->end, hash1);
+	mbuf_rewind(mb);
+
+	/* VERIFICATION */
+	err = pl_hex(&resp->response, hash2, resp->hash_length);
+	if (err)
+		goto out;
+
+	err = mem_seccmp(hash1, hash2, resp->hash_length) == 0 ? 0 : EACCES;
+
+out:
+	mem_deref(hash1);
+	mem_deref(hash2);
+	mem_deref(mb);
+
+	return err;
+}
+
+
+/**
+ * Verify a digest response
+ *
+ * @param req        Httpauth_digest_chall_req object
+ * @param hval       Authorization header field
+ * @param method     Access method
+ * @param etag       Changing data for nonce creation
+ *                   (HTTP ETag header / SIP msg src address)
+ * @param user       Username
+ * @param passwd     User password
+ * @param entitybody Entitybody if qop=auth-int
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int httpauth_digest_verify(struct httpauth_digest_chall_req *req,
+	const struct pl *hval, const struct pl *method,
+	const char *etag, const char *user, const char *passwd,
+	const char *entitybody)
+{
+	struct httpauth_digest_resp resp;
+	int err = 0;
+
+	if (!req || !hval || !method || !user || !passwd)
+		return EINVAL;
+
+	err = httpauth_digest_response_decode(&resp, hval);
+	if (err)
+		return err;
+
+	if (pl_strcasecmp(&resp.realm, req->realm))
+		return EINVAL;
+
+	err = check_nonce(req->nonce, &resp.nonce, etag);
+	if (err == ETIMEDOUT || err == EAUTH) {
+		req->stale = true;
+		return EAUTH;
+	}
+	else if (err) {
+		return err;
+	}
+
+	err = digest_verify(req, &resp, method, user, passwd, entitybody);
 	return err;
 }
