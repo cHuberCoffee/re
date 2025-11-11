@@ -30,6 +30,7 @@ struct aumix {
 	uint32_t frame_size;
 	uint32_t srate;
 	uint8_t ch;
+	bool full_mix;
 	struct {
 		uint16_t min;
 		uint16_t max;
@@ -190,8 +191,8 @@ static int aumix_thread(void *arg)
 				struct aumix_source *csrc = cle->data;
 				int32_t sample;
 
-				/* skip self */
-				if (csrc == src)
+				/* skip self if not full mix mode*/
+				if (csrc == src && !mix->full_mix)
 					continue;
 
 				if (csrc->muted)
@@ -262,15 +263,16 @@ static int aumix_thread(void *arg)
 /**
  * Allocate a new Audio mixer
  *
- * @param mixp  Pointer to allocated audio mixer
- * @param srate Sample rate in [Hz]
- * @param ch    Number of channels
- * @param ptime Packet time in [ms]
+ * @param mixp     Pointer to allocated audio mixer
+ * @param srate    Sample rate in [Hz]
+ * @param ch       Number of channels
+ * @param ptime    Packet time in [ms]
+ * @param full_mix Mix all sources (no skipping)
  *
  * @return 0 for success, otherwise error code
  */
 int aumix_alloc(struct aumix **mixp, uint32_t srate,
-		uint8_t ch, uint32_t ptime)
+		uint8_t ch, uint32_t ptime, bool full_mix)
 {
 	struct aumix *mix;
 	int err;
@@ -286,6 +288,7 @@ int aumix_alloc(struct aumix **mixp, uint32_t srate,
 	mix->frame_size	 = srate * ch * ptime / 1000;
 	mix->srate	 = srate;
 	mix->ch		 = ch;
+	mix->full_mix    = full_mix;
 	mix->recordh	 = NULL;
 	mix->latency.min = 60;	/* ms */
 	mix->latency.max = 200; /* ms */

@@ -19,7 +19,7 @@ typedef void (aumix_record_h)(struct auframe *af);
 typedef void (aumix_read_h)(struct auframe *af, void *arg);
 
 int aumix_alloc(struct aumix **mixp, uint32_t srate,
-		uint8_t ch, uint32_t ptime);
+		uint8_t ch, uint32_t ptime, bool full_mix);
 void aumix_latency(struct aumix *mix, uint16_t min, uint16_t max);
 void aumix_recordh(struct aumix *mix, aumix_record_h *recordh);
 void aumix_record_sumh(struct aumix *mix, aumix_record_h *recordh);
