@@ -37,8 +37,10 @@ struct aumix {
 	} latency;
 	aumix_record_h *recordh;
 	aumix_record_h *record_sumh;
+	aumix_eof_h    *eofh;
 	struct auframe rec_sum;
 	bool run;
+	void *arg;
 };
 
 /** Defines an Audio mixer source */
@@ -148,11 +150,15 @@ static int aumix_thread(void *arg)
 			if (aufile_read(mix->af, frame, &n) || n == 0) {
 				mix->af = mem_deref(mix->af);
 				base_frame = silence;
+				if (mix->eofh)
+					mix->eofh(mix->arg);
 			}
 			else if (n < mix->frame_size*2) {
 				memset(frame + n, 0, mix->frame_size*2 - n);
 				mix->af = mem_deref(mix->af);
 				base_frame = frame;
+				if (mix->eofh)
+					mix->eofh(mix->arg);
 			}
 			else {
 				base_frame = frame;
@@ -375,6 +381,25 @@ void aumix_record_sumh(struct aumix *mix, aumix_record_h *recordh)
 
 	mtx_lock(mix->mutex);
 	mix->record_sumh = recordh;
+	mtx_unlock(mix->mutex);
+}
+
+
+/**
+ * Add audio file EOF handler
+ *
+ * @param mix  Audio mixer
+ * @param eofh End-Of-File handler
+ * @param arg  Handler argument
+ */
+void aumix_eofh(struct aumix *mix, aumix_eof_h *eofh, void *arg)
+{
+	if (!mix)
+		return;
+
+	mtx_lock(mix->mutex);
+	mix->eofh = eofh;
+	mix->arg = arg;
 	mtx_unlock(mix->mutex);
 }
 
